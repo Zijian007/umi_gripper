@@ -9,17 +9,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable, Protocol
 
-from serial.tools import list_ports
-from scservo_sdk import (
-    COMM_SUCCESS,
-    PortHandler,
-    SMS_STS_PRESENT_CURRENT_L,
-    SMS_STS_PRESENT_LOAD_L,
-    SMS_STS_PRESENT_TEMPERATURE,
-    SMS_STS_TORQUE_ENABLE,
-    sms_sts,
-)
 
 STEPS_PER_TURN = 4096
 POSITION_TOLERANCE_STEPS = 12
@@ -186,15 +177,33 @@ def validate_config(config: dict, *, calibrated: bool = True) -> None:
         ports[item["serial_port"]] = item["baudrate"]
 
 
+class ServoBusPort(Protocol):
+    """Controller-facing bus contract; successful reads provide explicit position/status feedback."""
+
+    def open(self) -> None: ...
+    def close(self) -> None: ...
+    def verify(self, sid: int) -> int: ...
+    def check_position_mode(self, sid: int) -> None: ...
+    def prepare(self, sid: int, strength: int) -> None: ...
+    def set_grip_strength(self, sid: int, strength: int) -> None: ...
+    def set_position(self, sid: int, position: int, speed: int) -> None: ...
+    def telemetry(self, sid: int) -> dict: ...
+
+
 class ServoBus:
     """一个物理串口，可供多个不同 ID 的舵机使用。"""
 
     def __init__(self, port: str, baudrate: int):
+        import scservo_sdk
+
+        self.sdk = scservo_sdk
         self.port_name, self.baudrate = port, baudrate
-        self.port, self.packet, self.opened = PortHandler(port), None, False
+        self.port, self.packet, self.opened = self.sdk.PortHandler(port), None, False
 
     @staticmethod
     def _check(result: int, error: int, action: str) -> None:
+        from scservo_sdk import COMM_SUCCESS
+
         if result != COMM_SUCCESS:
             raise GripperError(f"{action}失败：串口通信异常（代码 {result}）。")
         if error:
@@ -210,7 +219,7 @@ class ServoBus:
         if not self.port.setBaudRate(self.baudrate):
             self.close()
             raise GripperError(f"无法设置串口速度 {self.baudrate}。")
-        self.packet = sms_sts(self.port)
+        self.packet = self.sdk.sms_sts(self.port)
 
     def close(self) -> None:
         if self.opened:
@@ -248,7 +257,7 @@ class ServoBus:
         return model
 
     def configure_position_mode(self, sid: int) -> None:
-        self._write1(sid, SMS_STS_TORQUE_ENABLE, 1, "开启扭矩")
+        self._write1(sid, self.sdk.SMS_STS_TORQUE_ENABLE, 1, "开启扭矩")
         self._write1(sid, 55, 0, "解锁舵机设置")
         self._write2(sid, 9, 0, "设置最小角度")
         self._write2(sid, 11, STEPS_PER_TURN - 1, "设置最大角度")
@@ -257,7 +266,7 @@ class ServoBus:
 
     def set_current_position_as_middle(self, sid: int) -> None:
         """使用舵机的置中指令，将当前安装角度设为 2048。"""
-        self._write1(sid, SMS_STS_TORQUE_ENABLE, 128, "将当前位置设为中位")
+        self._write1(sid, self.sdk.SMS_STS_TORQUE_ENABLE, 128, "将当前位置设为中位")
         time.sleep(0.05)
         position, result, error = self.packet.ReadPos(sid)
         self._check(result, error, "确认中位设置")
@@ -273,7 +282,7 @@ class ServoBus:
     def prepare(self, sid: int, strength: int) -> None:
         # self.configure_overload_protection(sid)
         self.set_grip_strength(sid, strength)
-        self._write1(sid, SMS_STS_TORQUE_ENABLE, 1, "开启扭矩")
+        self._write1(sid, self.sdk.SMS_STS_TORQUE_ENABLE, 1, "开启扭矩")
 
     def configure_overload_protection(self, sid: int) -> None:
         """写入负载过载参数，同时保留其余卸载保护开关。"""
@@ -329,9 +338,9 @@ class ServoBus:
     def telemetry(self, sid: int) -> dict:
         position, result, error = self.packet.ReadPos(sid)
         self._check(result, error, "读取当前位置")
-        load = self._read2(sid, SMS_STS_PRESENT_LOAD_L, "读取负载")
-        current = self._read2(sid, SMS_STS_PRESENT_CURRENT_L, "读取电流")
-        temp = self._read1(sid, SMS_STS_PRESENT_TEMPERATURE, "读取温度")
+        load = self._read2(sid, self.sdk.SMS_STS_PRESENT_LOAD_L, "读取负载")
+        current = self._read2(sid, self.sdk.SMS_STS_PRESENT_CURRENT_L, "读取电流")
+        temp = self._read1(sid, self.sdk.SMS_STS_PRESENT_TEMPERATURE, "读取温度")
         load = -(load & ~(1 << 10)) if load & (1 << 10) else load
         current = -(current & ~(1 << 15)) if current & (1 << 15) else current
         return {
@@ -343,6 +352,9 @@ class ServoBus:
 
 
 def _scan(baudrates: tuple[int, ...]) -> list[dict]:
+    from serial.tools import list_ports
+    from scservo_sdk import COMM_SUCCESS, PortHandler, sms_sts
+
     found = []
     for info in list_ports.comports():
         handler, opened = PortHandler(info.device), False
@@ -407,7 +419,7 @@ class _KeyReader:
 class _Channel:
     index: int
     config: dict
-    bus: ServoBus
+    bus: ServoBusPort
     calibrated: bool
     position: int | None = None
     position_valid: bool = False
@@ -440,6 +452,7 @@ class Gripper:
         *,
         config: dict | None = None,
         allow_uninitialized=False,
+        bus_factory: Callable[[str, int], ServoBusPort] | None = None,
     ):
         self.config_path = Path(config_path)
         self.config = {
@@ -456,12 +469,15 @@ class Gripper:
             {},
         )
         self.strength_lock = threading.Lock()
+        bus_factory = ServoBus if bus_factory is None else bus_factory
         try:
             for index, item in enumerate(self.config["servos"]):
                 if item is None:
                     continue
                 key = (item["serial_port"], item["baudrate"])
-                bus = self.buses.setdefault(key, ServoBus(*key))
+                if key not in self.buses:
+                    self.buses[key] = bus_factory(*key)
+                bus = self.buses[key]
                 self.channels[index] = _Channel(
                     index, item, bus, item.get("open_position_steps") is not None
                 )

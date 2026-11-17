@@ -1,5 +1,25 @@
 # 总线舵机夹爪控制
 
+## 无串口开发与测试
+
+`Gripper(..., bus_factory=...)` 可注入实现 `open/close/verify/check_position_mode/prepare/set_position/set_grip_strength/telemetry` 的总线。
+默认仍用真实 ServoBus；只有选择真实总线或扫描设备时才导入串口/舵机 SDK。
+`FakeServoBus` 提供显式反馈、指令记录、卡滞开关和故障注入，不访问串口。
+
+```python
+from gripper import Gripper
+from fake_bus import FakeServoBus
+
+# config 是有效的标定配置；真实串口名不是 fake 开关。
+with Gripper(config=config, bus_factory=FakeServoBus) as gripper:
+    gripper.goto(0.8, 0)
+    result = gripper.wait(timeout=2, channel=0)
+```
+
+在仓根执行 `python -m unittest discover -s tests -q`，不需要 pyserial 或舵机 SDK。
+覆盖到位、共用总线、明确通道、初始化失败回滚和断开后线程退出。
+假总线立即更新位置，不模拟负载、惯量、力控或实际夹持效果。
+
 这是一个用于控制一到两个总线舵机夹爪的 Python 项目。它支持两个舵机共用一个串口，也支持每个舵机各自使用一个串口。
 
 项目提供以下功能：
