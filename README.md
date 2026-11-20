@@ -161,7 +161,9 @@ from gripper import Gripper
 
 with Gripper() as gripper:
     gripper.goto(0.8, 0)
-    gripper.wait(channel=0)
+    result = gripper.wait(channel=0)
+    reading = gripper.read(channel=0)
+    print(result["status"], reading.width, reading.temperature_c)
 ```
 
 常用方法如下：
@@ -169,11 +171,14 @@ with Gripper() as gripper:
 | 方法 | 作用 |
 | --- | --- |
 | `goto(开度, 通道号)` | 设定目标开度，开度范围为 0 到 1。 |
+| `open_gripper(通道号)` / `close_gripper(通道号)` | 移动到标定的完全张开 / 完全闭合位置。 |
+| `stop(通道号)` | 停止指定通道并保持会话打开，返回最新反馈。 |
+| `read(通道号)` | 返回结构化反馈，包含稳定状态码、位置、采样时间、温度、电流和负载。 |
 | `get_width(通道号)` | 返回当前实际开度。 |
 | `get_state(通道号)` | 返回位置、负载、电流、温度与当前状态。 |
 | `wait(timeout, 通道号)` | 等待本次运动结束并返回状态。 |
 | `reset(通道号)` | 回到标定的中立位置。 |
-| `set_grip_strength(力度, 通道号, direction="闭合")` | 更新闭合力度；传入 `direction="张开"` 可更新张开力度。正在使用该方向的力度时立即生效，否则在下次该方向运动前生效。 |
+| `set_grip_strength(力度, 通道号, direction="close")` | 更新指定方向的力度；`direction` 支持 `open` / `close`，也兼容 `张开` / `闭合`。正在使用该方向的力度时立即生效，否则在下次该方向运动前生效。 |
 | `disconnect()` | 停止后台更新并关闭串口。 |
 
 当配置了两个通道时，调用 `goto()`、`get_width()` 等方法必须明确给出通道号。调用未配置的通道会直接报错。
@@ -181,6 +186,8 @@ with Gripper() as gripper:
 ## 运行状态说明
 
 `get_state()` 返回的内容包含 `state`、`message`、`width`、`position_raw`、`sampled_at`、`error_code` 和 `telemetry` 等信息。`sampled_at` 使用单调时钟，表示最近一次成功读取硬件反馈的时间。常见状态如下：
+
+`read()` 返回 `GripperReading`，其中 `status` 是跨项目稳定使用的状态码：`initializing`、`ready`、`moving`、`stopping`、`arrived`、`grasped`、`blocked`、`error` 和 `stopped`。`get_state()` 同时增加同名的 `status` 字段，原有中文 `state` 字段继续保留。
 
 | 状态 | 含义 |
 | --- | --- |

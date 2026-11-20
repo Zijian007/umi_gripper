@@ -12,6 +12,7 @@ from gripper import (
     ConfigError,
     Gripper,
     GripperError,
+    GripperReading,
     decode_status_block,
     default_servo_config,
 )
@@ -36,6 +37,33 @@ class ControllerTest(unittest.TestCase):
         gripper.goto(0.8)
         self.assertEqual(gripper.wait(timeout=2)["state"], "已到位")
         self.assertAlmostEqual(gripper.get_width(), 0.8, places=2)
+
+    def test_read_returns_structured_feedback_with_stable_status(self):
+        gripper = self.make_gripper([channel(), None])
+        reading = gripper.read()
+        self.assertIsInstance(reading, GripperReading)
+        self.assertEqual(reading.status, "ready")
+        self.assertEqual(reading.position_steps, 2048)
+        self.assertGreater(reading.sampled_at, 0.0)
+        self.assertAlmostEqual(reading.current_a, 0.0)
+
+    def test_state_telemetry_is_a_snapshot(self):
+        gripper = self.make_gripper([channel(), None])
+        state = gripper.get_state()
+        state["telemetry"]["raw_position"] = 0
+        self.assertEqual(gripper.read().position_steps, 2048)
+
+    def test_named_open_close_and_channel_stop(self):
+        gripper = self.make_gripper([channel(), None])
+        gripper.close_gripper()
+        self.assertEqual(gripper.wait(timeout=2)["status"], "arrived")
+        self.assertAlmostEqual(gripper.get_width(), 0.0, places=2)
+        gripper.open_gripper()
+        self.assertEqual(gripper.wait(timeout=2)["status"], "arrived")
+        self.assertAlmostEqual(gripper.get_width(), 1.0, places=2)
+        gripper.goto(0.4)
+        stopped = gripper.stop()
+        self.assertEqual(stopped.status, "ready")
 
     def test_configured_acceleration_is_sent_and_feedback_has_timestamp(self):
         config = channel()
