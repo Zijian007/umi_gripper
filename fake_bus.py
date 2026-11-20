@@ -43,10 +43,10 @@ class FakeServoBus:
             self._require_open()
             self.commands.append(("strength", sid, strength))
 
-    def set_position(self, sid, position, speed):
+    def set_position(self, sid, position, speed, accel=50):
         with self._lock:
             self._require_open()
-            self.commands.append(("position", sid, position, speed))
+            self.commands.append(("position", sid, position, speed, accel))
             if not self.stalled:
                 self.positions[sid] = position
 

@@ -1,13 +1,20 @@
 """Exercise real controller threading and cleanup with an injected bus, no SDK."""
 
 import sys
+import time
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fake_bus import FakeServoBus
-from gripper import Gripper, GripperError, default_servo_config
+from gripper import (
+    ConfigError,
+    Gripper,
+    GripperError,
+    decode_status_block,
+    default_servo_config,
+)
 
 
 def channel(sid=1, port="fake"):
@@ -29,6 +36,79 @@ class ControllerTest(unittest.TestCase):
         gripper.goto(0.8)
         self.assertEqual(gripper.wait(timeout=2)["state"], "已到位")
         self.assertAlmostEqual(gripper.get_width(), 0.8, places=2)
+
+    def test_configured_acceleration_is_sent_and_feedback_has_timestamp(self):
+        config = channel()
+        config["accel"] = 7
+        gripper = self.make_gripper([config, None])
+        self.assertGreater(gripper.get_state()["sampled_at"], 0.0)
+        gripper.goto(0.8)
+        self.assertEqual(gripper.wait(timeout=2)["state"], "已到位")
+        position_commands = [
+            command for command in gripper.buses["fake", 1000000].commands
+            if command[0] == "position"
+        ]
+        self.assertTrue(position_commands)
+        self.assertEqual(position_commands[-1][-1], 7)
+
+    def test_status_packet_decoder_preserves_signed_units(self):
+        data = [0] * 15
+        data[0], data[1] = 0x11, 0x08
+        data[4], data[5] = 0x38, 0x04
+        data[7] = 36
+        data[13], data[14] = 0x04, 0x80
+        self.assertEqual(
+            decode_status_block(data),
+            {
+                "raw_position": 2065,
+                "load": -56,
+                "current_ma": -26,
+                "temperature_c": 36,
+            },
+        )
+
+    def test_overtemperature_requires_hold_and_cooling_clears_error(self):
+        config = channel()
+        config["overtemp_hold_s"] = 0.05
+        gripper = self.make_gripper([config, None])
+        bus = gripper.buses["fake", 1000000]
+        bus.temperature_c = 80
+        for _ in range(60):
+            if gripper.get_state()["state"] == "异常":
+                break
+            time.sleep(0.02)
+        self.assertEqual(gripper.get_state()["state"], "异常")
+        bus.temperature_c = 60
+        # A subsequent good sample clears the latched error without resuming a target.
+        for _ in range(20):
+            if gripper.get_state()["state"] == "就绪":
+                break
+            time.sleep(0.02)
+        self.assertEqual(gripper.get_state()["state"], "就绪")
+
+    def test_good_sample_clears_communication_error_without_resuming_motion(self):
+        gripper = self.make_gripper([channel(), None])
+        bus = gripper.buses["fake", 1000000]
+        bus.telemetry_error = GripperError("无状态包", code=-6)
+        for _ in range(20):
+            if gripper.get_state()["state"] == "异常":
+                break
+            time.sleep(0.02)
+        self.assertEqual(gripper.get_state()["state"], "异常")
+        self.assertEqual(gripper.get_state()["error_code"], -6)
+        bus.telemetry_error = None
+        for _ in range(20):
+            if gripper.get_state()["state"] == "就绪":
+                break
+            time.sleep(0.02)
+        self.assertEqual(gripper.get_state()["state"], "就绪")
+        self.assertEqual(gripper.get_state()["error_code"], 0)
+
+    def test_invalid_overtemperature_configuration_is_rejected(self):
+        config = channel()
+        config["overtemp_clear_c"] = config["overtemp_c"]
+        with self.assertRaises(ConfigError):
+            Gripper(config={"servos": [config, None]}, bus_factory=FakeServoBus)
 
     def test_shared_port_uses_one_bus_and_requires_channel(self):
         gripper = self.make_gripper([channel(1), channel(2)])

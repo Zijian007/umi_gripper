@@ -13,21 +13,58 @@ from typing import Callable, Protocol
 
 
 STEPS_PER_TURN = 4096
-POSITION_TOLERANCE_STEPS = 12
 INITIAL_POSITION_TIMEOUT_S = 2.0
-CLOSING_STALL_WINDOW_S = 0.2
-OPENING_STALL_WINDOW_S = 0.5
-STALL_MOVEMENT_STEPS = 3
 DEFAULT_BAUDRATES = (1_000_000, 500_000, 250_000, 115_200, 57_600, 38_400)
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("gripper_config.json")
 
+DEFAULT_MOTION_OPTIONS = {
+    "accel": 50,
+    "position_tolerance_steps": 12,
+    "stall_movement_steps": 3,
+    "opening_stall_window_s": 0.5,
+    "closing_stall_window_s": 0.2,
+    "overtemp_c": 70,
+    "overtemp_clear_c": 65,
+    "overtemp_hold_s": 0.5,
+}
+
+_FEEDBACK_START = 56
+_FEEDBACK_LENGTH = 15
+
 
 class GripperError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: int | None = None):
+        super().__init__(message)
+        self.code = code
 
 
 class ConfigError(GripperError):
     pass
+
+
+def _word(data: list[int], offset: int) -> int:
+    return data[offset] | (data[offset + 1] << 8)
+
+
+def _signed(value: int, bit: int) -> int:
+    return -(value & ~(1 << bit)) if value & (1 << bit) else value
+
+
+def decode_status_block(data: list[int]) -> dict:
+    """Decode one contiguous STS status packet from address 56 to 70."""
+    if len(data) < _FEEDBACK_LENGTH:
+        raise GripperError(
+            f"读取反馈失败：状态包长度不足（{len(data)} 字节）"
+        )
+    position = _signed(_word(data, 0), 15) % STEPS_PER_TURN
+    load = _signed(_word(data, 4), 10)
+    current = _signed(_word(data, 13), 15)
+    return {
+        "raw_position": position,
+        "load": load,
+        "current_ma": round(current * 6.5),
+        "temperature_c": data[7],
+    }
 
 
 def _read_json(path: Path) -> dict:
@@ -69,6 +106,7 @@ def default_servo_config(selected: dict | None = None) -> dict:
         "status_frequency_hz": 50,
         "calibration_step_steps": 128,
         "motion_timeout_s": 30,
+        **DEFAULT_MOTION_OPTIONS,
     }
 
 
@@ -104,6 +142,8 @@ def _servos(config: dict) -> list[dict | None]:
         if old_strength is not None:
             item.setdefault("open_grip_strength", old_strength)
             item.setdefault("close_grip_strength", old_strength)
+        for key, value in DEFAULT_MOTION_OPTIONS.items():
+            item.setdefault(key, value)
         # 标定力度只取代码中的默认值，不接受 JSON 中的同名设置。
         item["calibration_grip_strength"] = default_servo_config()[
             "calibration_grip_strength"
@@ -138,6 +178,24 @@ def _validate_servo(config: dict, channel: int, calibrated: bool) -> None:
     _integer(config, "status_frequency_hz", 1, 100)
     _integer(config, "calibration_step_steps", 10, 1024)
     _integer(config, "motion_timeout_s", 2, 120)
+    _integer(config, "accel", 0, 254)
+    _integer(config, "position_tolerance_steps", 0, 128)
+    _integer(config, "stall_movement_steps", 1, 128)
+    _integer(config, "overtemp_c", 1, 100)
+    _integer(config, "overtemp_clear_c", 0, 99)
+    if config["overtemp_clear_c"] >= config["overtemp_c"]:
+        raise ConfigError("过温解除温度必须低于过温触发温度。")
+    for key in ("opening_stall_window_s", "closing_stall_window_s"):
+        value = config[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(f"配置项“{key}”必须是 0.05 到 5 秒的数字。")
+        if not 0.05 <= float(value) <= 5.0:
+            raise ConfigError(f"配置项“{key}”必须是 0.05 到 5 秒的数字。")
+    hold = config["overtemp_hold_s"]
+    if isinstance(hold, bool) or not isinstance(hold, (int, float)):
+        raise ConfigError("配置项“overtemp_hold_s”必须是 0 到 5 秒的数字。")
+    if not 0.0 <= float(hold) <= 5.0:
+        raise ConfigError("配置项“overtemp_hold_s”必须是 0 到 5 秒的数字。")
     if not calibrated:
         return
     for key in (
@@ -186,7 +244,7 @@ class ServoBusPort(Protocol):
     def check_position_mode(self, sid: int) -> None: ...
     def prepare(self, sid: int, strength: int) -> None: ...
     def set_grip_strength(self, sid: int, strength: int) -> None: ...
-    def set_position(self, sid: int, position: int, speed: int) -> None: ...
+    def set_position(self, sid: int, position: int, speed: int, accel: int = 50) -> None: ...
     def telemetry(self, sid: int) -> dict: ...
 
 
@@ -199,32 +257,39 @@ class ServoBus:
         self.sdk = scservo_sdk
         self.port_name, self.baudrate = port, baudrate
         self.port, self.packet, self.opened = self.sdk.PortHandler(port), None, False
+        self._io_lock = threading.RLock()
 
     @staticmethod
     def _check(result: int, error: int, action: str) -> None:
         from scservo_sdk import COMM_SUCCESS
 
         if result != COMM_SUCCESS:
-            raise GripperError(f"{action}失败：串口通信异常（代码 {result}）。")
+            raise GripperError(
+                f"{action}失败：串口通信异常（代码 {result}）。", code=result
+            )
         if error:
-            raise GripperError(f"{action}失败：舵机报告异常（代码 {error}）。")
+            raise GripperError(
+                f"{action}失败：舵机报告异常（代码 {error}）。", code=error
+            )
 
     def open(self) -> None:
-        try:
-            self.opened = self.port.openPort()
-        except Exception as exc:
-            raise GripperError(f"无法打开串口 {self.port_name}：{exc}") from exc
-        if not self.opened:
-            raise GripperError(f"无法打开串口 {self.port_name}。")
-        if not self.port.setBaudRate(self.baudrate):
-            self.close()
-            raise GripperError(f"无法设置串口速度 {self.baudrate}。")
-        self.packet = self.sdk.sms_sts(self.port)
+        with self._io_lock:
+            try:
+                self.opened = self.port.openPort()
+            except Exception as exc:
+                raise GripperError(f"无法打开串口 {self.port_name}：{exc}") from exc
+            if not self.opened:
+                raise GripperError(f"无法打开串口 {self.port_name}。")
+            if not self.port.setBaudRate(self.baudrate):
+                self.close()
+                raise GripperError(f"无法设置串口速度 {self.baudrate}。")
+            self.packet = self.sdk.sms_sts(self.port)
 
     def close(self) -> None:
-        if self.opened:
-            self.port.closePort()
-            self.opened = False
+        with self._io_lock:
+            if self.opened:
+                self.opened = False
+                self.port.closePort()
 
     def __enter__(self):
         self.open()
@@ -234,25 +299,30 @@ class ServoBus:
         self.close()
 
     def _read1(self, sid, address, action):
-        value, result, error = self.packet.read1ByteTxRx(sid, address)
+        with self._io_lock:
+            value, result, error = self.packet.read1ByteTxRx(sid, address)
         self._check(result, error, action)
         return value
 
     def _read2(self, sid, address, action):
-        value, result, error = self.packet.read2ByteTxRx(sid, address)
+        with self._io_lock:
+            value, result, error = self.packet.read2ByteTxRx(sid, address)
         self._check(result, error, action)
         return value
 
     def _write1(self, sid, address, value, action):
-        result, error = self.packet.write1ByteTxRx(sid, address, value)
+        with self._io_lock:
+            result, error = self.packet.write1ByteTxRx(sid, address, value)
         self._check(result, error, action)
 
     def _write2(self, sid, address, value, action):
-        result, error = self.packet.write2ByteTxRx(sid, address, value)
+        with self._io_lock:
+            result, error = self.packet.write2ByteTxRx(sid, address, value)
         self._check(result, error, action)
 
     def verify(self, sid: int) -> int:
-        model, result, error = self.packet.ping(sid)
+        with self._io_lock:
+            model, result, error = self.packet.ping(sid)
         self._check(result, error, f"确认 ID {sid} 舵机")
         return model
 
@@ -268,7 +338,8 @@ class ServoBus:
         """使用舵机的置中指令，将当前安装角度设为 2048。"""
         self._write1(sid, self.sdk.SMS_STS_TORQUE_ENABLE, 128, "将当前位置设为中位")
         time.sleep(0.05)
-        position, result, error = self.packet.ReadPos(sid)
+        with self._io_lock:
+            position, result, error = self.packet.ReadPos(sid)
         self._check(result, error, "确认中位设置")
         if not 2044 <= position <= 2052:
             raise GripperError("舵机未能将当前位置设为中位，请检查舵机型号和通信。")
@@ -280,6 +351,7 @@ class ServoBus:
             )
 
     def prepare(self, sid: int, strength: int) -> None:
+        print(f"prepare: sid={sid}, strength={strength}")
         # self.configure_overload_protection(sid)
         self.set_grip_strength(sid, strength)
         self._write1(sid, self.sdk.SMS_STS_TORQUE_ENABLE, 1, "开启扭矩")
@@ -331,24 +403,20 @@ class ServoBus:
         self._write1(new_id, 55, 1, "锁定舵机设置")
         self.verify(new_id)
 
-    def set_position(self, sid: int, position: int, speed: int) -> None:
-        result, error = self.packet.WritePosEx(sid, position, speed, 50)
+    def set_position(self, sid: int, position: int, speed: int, accel: int = 50) -> None:
+        with self._io_lock:
+            result, error = self.packet.WritePosEx(sid, position, speed, accel)
         self._check(result, error, "下发目标位置")
 
     def telemetry(self, sid: int) -> dict:
-        position, result, error = self.packet.ReadPos(sid)
-        self._check(result, error, "读取当前位置")
-        load = self._read2(sid, self.sdk.SMS_STS_PRESENT_LOAD_L, "读取负载")
-        current = self._read2(sid, self.sdk.SMS_STS_PRESENT_CURRENT_L, "读取电流")
-        temp = self._read1(sid, self.sdk.SMS_STS_PRESENT_TEMPERATURE, "读取温度")
-        load = -(load & ~(1 << 10)) if load & (1 << 10) else load
-        current = -(current & ~(1 << 15)) if current & (1 << 15) else current
-        return {
-            "raw_position": position % STEPS_PER_TURN,
-            "load": load,
-            "current_ma": round(current * 6.5),
-            "temperature_c": temp,
-        }
+        with self._io_lock:
+            data, result, _error = self.packet.readTxRx(
+                sid, _FEEDBACK_START, _FEEDBACK_LENGTH
+            )
+        # The SDK packet error byte overlaps the status block's address 65.
+        # The block remains decodable when that byte is nonzero.
+        self._check(result, 0, "读取反馈")
+        return decode_status_block(list(data))
 
 
 def _scan(baudrates: tuple[int, ...]) -> list[dict]:
@@ -438,6 +506,11 @@ class _Channel:
     next_status: float = 0
     initial_position_ready: threading.Event = field(default_factory=threading.Event)
     initial_position_error: GripperError | None = None
+    sampled_at: float = 0.0
+    error_code: int = 0
+    bus_fault: bool = False
+    overtemp_since: float | None = None
+    overtemp_latched: bool = False
     applied_strength: int | None = None
     active_strength_key: str | None = None
     pending_strength: tuple[str, int] | None = None
@@ -501,6 +574,10 @@ class Gripper:
                     "blocked_direction": None,
                     "target_width": None,
                     "width": None,
+                    "position_raw": None,
+                    "position_unit": "steps",
+                    "sampled_at": 0.0,
+                    "error_code": 0,
                     "telemetry": None,
                     "message": "正在读取单圈绝对位置。",
                 }
@@ -530,7 +607,10 @@ class Gripper:
             for item in self.channels.values():
                 item.stopped.wait(0.5)
         self.stop_event.set()
+        self.wakeup.set()
         self.worker.join(timeout=1)
+        if self.worker.is_alive():
+            raise GripperError("后台轮询线程未退出，串口保持打开。")
         for bus in self.buses.values():
             bus.close()
 
@@ -575,10 +655,11 @@ class Gripper:
     def _position_is_valid(item, position):
         closed = item.config["closed_position_steps"]
         opened = item.config["open_position_steps"]
+        tolerance = item.config["position_tolerance_steps"]
         return (
-            min(closed, opened) - POSITION_TOLERANCE_STEPS
+            min(closed, opened) - tolerance
             <= position
-            <= max(closed, opened) + POSITION_TOLERANCE_STEPS
+            <= max(closed, opened) + tolerance
         )
 
     @staticmethod
@@ -594,7 +675,7 @@ class Gripper:
             f"{item.index} 号舵机当前读数为 {item.position}，超出标定范围 "
             f"{min(closed, opened)} 到 {max(closed, opened)}"
             f"（闭合位置 {closed}，张开位置 {opened}）。"
-            f"端点允许 {POSITION_TOLERANCE_STEPS} 步的停靠误差。"
+            f"端点允许 {item.config['position_tolerance_steps']} 步的停靠误差。"
             "通常是确认标定点后舵机仍有少量移动，或开合边界标得过紧；"
             "请重新标定并在两个端点留出少量余量。"
         )
@@ -611,8 +692,9 @@ class Gripper:
         return "张开" if delta * span > 0 else "闭合"
 
     @staticmethod
-    def _stall_window(direction):
-        return CLOSING_STALL_WINDOW_S if direction == "闭合" else OPENING_STALL_WINDOW_S
+    def _stall_window(item, direction):
+        key = "closing_stall_window_s" if direction == "闭合" else "opening_stall_window_s"
+        return float(item.config[key])
 
     def get_state(self, channel=None):
         item = self._channel(channel)
@@ -759,11 +841,43 @@ class Gripper:
             item.strength_error = None
             item.strength_applied.set()
 
+    def _temperature_fault(self, item, temperature_c: int) -> bool:
+        """Stop after sustained over-temperature and clear only after cooling."""
+        now = time.monotonic()
+        with self.lock:
+            trip_c = int(item.config["overtemp_c"])
+            clear_c = int(item.config["overtemp_clear_c"])
+            hold_s = float(item.config["overtemp_hold_s"])
+            if temperature_c >= trip_c:
+                if item.overtemp_since is None:
+                    item.overtemp_since = now
+                if now - item.overtemp_since < hold_s:
+                    return False
+                item.overtemp_latched = True
+            elif not item.overtemp_latched:
+                item.overtemp_since = None
+                return False
+            elif temperature_c <= clear_c:
+                item.overtemp_since = None
+                item.overtemp_latched = False
+                if item.state["state"] == "异常" and item.target is None:
+                    item.state.update(state="就绪", message="已恢复。")
+                return False
+            if item.stop_pending or item.state["message"] == "舵机温度过高，已停止运动。":
+                return True
+        self._request_stop(item, "异常", "舵机温度过高，已停止运动。")
+        return True
+
     def _update(self, item):
         try:
             t = item.bus.telemetry(item.config["servo_id"])
+            sampled_at = time.monotonic()
             with self.lock:
                 item.position = t["raw_position"]
+                item.sampled_at = sampled_at
+                item.error_code = 0
+                recovered_bus = item.bus_fault
+                item.bus_fault = False
                 item.position_valid = (
                     not item.calibrated
                     or self._position_is_valid(item, item.position)
@@ -782,8 +896,18 @@ class Gripper:
                         if item.calibrated and item.position_valid
                         else None
                     ),
+                    position_raw=position,
+                    sampled_at=sampled_at,
+                    error_code=0,
                     telemetry=t,
                 )
+                if (
+                    recovered_bus
+                    and item.state["state"] == "异常"
+                    and item.target is None
+                    and not item.overtemp_latched
+                ):
+                    item.state.update(state="就绪", message="已恢复。")
                 if not item.initial_position_ready.is_set():
                     if item.position_valid:
                         item.initial_position_error = None
@@ -802,12 +926,12 @@ class Gripper:
                 return
             if pending:
                 item.bus.set_position(
-                    item.config["servo_id"], position, item.config["speed"]
+                    item.config["servo_id"], position, item.config["speed"],
+                    item.config["accel"],
                 )
                 self._finish_stop(item, stop_version)
                 return
-            if t["temperature_c"] >= 70:
-                self._request_stop(item, "异常", "舵机温度过高，已停止运动。")
+            if self._temperature_fault(item, t["temperature_c"]):
                 return
             if target is None:
                 return
@@ -815,7 +939,7 @@ class Gripper:
             remaining = abs(position - target)
             if item.blocked_direction == direction:
                 return
-            if remaining <= POSITION_TOLERANCE_STEPS:
+            if remaining <= item.config["position_tolerance_steps"]:
                 self._request_stop(item, "已到位", "已到达目标位置。")
             elif item.sent_version != version:
                 strength_key = (
@@ -831,7 +955,9 @@ class Gripper:
                 with self.lock:
                     if item.version != version:
                         return
-                item.bus.set_position(item.config["servo_id"], target, target_speed)
+                item.bus.set_position(
+                    item.config["servo_id"], target, target_speed, item.config["accel"]
+                )
                 with self.lock:
                     if item.version != version:
                         return
@@ -849,12 +975,13 @@ class Gripper:
                     if (
                         reference_position is None
                         or reference_at is None
-                        or abs(position - reference_position) >= STALL_MOVEMENT_STEPS
+                        or abs(position - reference_position)
+                        >= item.config["stall_movement_steps"]
                     ):
                         item.motion_reference_position = position
                         item.motion_reference_at = now
                         return
-                    stalled = now - reference_at >= self._stall_window(direction)
+                    stalled = now - reference_at >= self._stall_window(item, direction)
                 if not stalled:
                     return
                 if direction == "闭合":
@@ -868,11 +995,16 @@ class Gripper:
                 )
         except GripperError as exc:
             with self.lock:
-                item.initial_position_error = exc
+                item.error_code = exc.code or 0
+                item.bus_fault = True
+                if not item.initial_position_ready.is_set():
+                    item.initial_position_error = exc
                 item.target = item.target_speed = None
                 item.stop_pending = False
                 item.stopped.set()
-                item.state.update(state="异常", message=str(exc))
+                item.state.update(
+                    state="异常", message=str(exc), error_code=item.error_code
+                )
 
     def _run(self):
         while not self.stop_event.is_set():

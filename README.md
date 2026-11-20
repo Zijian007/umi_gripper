@@ -50,6 +50,12 @@ with Gripper(config=config, bus_factory=FakeServoBus) as gripper:
 pip install -r requirement.txt
 ```
 
+作为其他项目的 Python 依赖时，可以直接安装本仓库：
+
+```bash
+python -m pip install -e /path/to/umi_gripper
+```
+
 Linux 下串口通常需要当前用户拥有访问权限；如无法打开 `/dev/ttyACM*` 或 `/dev/ttyUSB*`，可临时放开（拔插 USB 后可能失效，需再执行一次）：
 
 ```bash
@@ -174,7 +180,7 @@ with Gripper() as gripper:
 
 ## 运行状态说明
 
-`get_state()` 返回的内容包含 `state`、`message`、`width` 和 `telemetry` 等信息。常见状态如下：
+`get_state()` 返回的内容包含 `state`、`message`、`width`、`position_raw`、`sampled_at`、`error_code` 和 `telemetry` 等信息。`sampled_at` 使用单调时钟，表示最近一次成功读取硬件反馈的时间。常见状态如下：
 
 | 状态 | 含义 |
 | --- | --- |
@@ -207,6 +213,14 @@ with Gripper() as gripper:
 | `status_frequency_hz` | 后台读取状态的频率，范围 1 到 100。 | 50 |
 | `calibration_step_steps` | 标定时每次按 W/S 的移动步长。 | 128 |
 | `motion_timeout_s` | `wait()` 的默认超时时间，单位为秒。 | 30 |
+| `accel` | 位置模式加速度，范围 0 到 254；0 表示使用舵机最大加速度。 | 50 |
+| `position_tolerance_steps` | 到位和有效位置判断的步数容差，范围 0 到 128。 | 12 |
+| `stall_movement_steps` | 堵转窗口内必须发生的最小位置变化，范围 1 到 128。 | 3 |
+| `opening_stall_window_s` | 张开方向堵转判定窗口，范围 0.05 到 5 秒。 | 0.5 |
+| `closing_stall_window_s` | 闭合方向夹持判定窗口，范围 0.05 到 5 秒。 | 0.2 |
+| `overtemp_c` | 过温触发温度，范围 1 到 100℃。 | 70 |
+| `overtemp_clear_c` | 解除过温的温度，必须低于 `overtemp_c`。 | 65 |
+| `overtemp_hold_s` | 必须持续过温的时间，范围 0 到 5 秒。 | 0.5 |
 
 可以在断开夹爪后手动修改速度、力度等设置。请不要手动修改标定位置、串口、ID 或通信速度，除非你明确知道改动后的硬件状态；更换舵机、安装位置或 ID 后，应重新标定。
 
