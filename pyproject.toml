@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "umi-gripper"
-version = "0.1.0"
+version = "0.1.2"
 description = "Two-channel STS bus-servo gripper controller"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,5 +13,11 @@ dependencies = [
     "ftservo-python-sdk==2.0.0",
 ]
 
+[project.scripts]
+umi-calibrate = "umi_gripper.cli.calibrate:cli"
+umi-id = "umi_gripper.cli.identifier:cli"
+umi-demo = "umi_gripper.cli.demo:cli"
+
 [tool.setuptools]
-py-modules = ["gripper", "fake_bus"]
+py-modules = ["gripper"]
+packages = ["umi_gripper", "umi_gripper.cli"]

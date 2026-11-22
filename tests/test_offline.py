@@ -7,7 +7,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fake_bus import FakeServoBus
 from gripper import (
     ConfigError,
     Gripper,
@@ -16,6 +15,7 @@ from gripper import (
     decode_status_block,
     default_servo_config,
 )
+from umi_gripper.fake_bus import FakeServoBus
 
 
 def channel(sid=1, port="fake"):
@@ -153,6 +153,29 @@ class ControllerTest(unittest.TestCase):
         gripper.disconnect()
         self.assertFalse(gripper.worker.is_alive())
         self.assertFalse(bus.opened)
+
+    def test_manual_step_then_calibrated_control_uses_the_same_session(self):
+        config = channel()
+        for name in ("closed_position_steps", "neutral_position_steps", "open_position_steps"):
+            config[name] = None
+        with Gripper(
+            config={"servos": [config, None]}, allow_uninitialized=True,
+            bus_factory=FakeServoBus, initialize_calibration=True,
+        ) as device:
+            bus = next(iter(device.buses.values()))
+            self.assertEqual(bus.commands[:3], [("position_mode", 1), ("set_middle", 1), ("strength", 1, 40)])
+            self.assertIsNone(device.read().width)
+            device.manual_step(1)
+            self.assertEqual(device.wait(timeout=2)["status"], "arrived")
+            self.assertEqual(device.read().position_steps, 2048 + config["calibration_step_steps"])
+            device.set_calibration(0, channel())
+            self.assertEqual(device.config["servos"][0]["open_position_steps"], 3000)
+            device.set_grip_strength(55)
+            self.assertEqual(device.config["servos"][0]["close_grip_strength"], 55)
+            device.goto(0.25)
+            self.assertEqual(device.wait(timeout=2)["status"], "arrived")
+            self.assertAlmostEqual(device.get_width(), 0.25)
+            self.assertIs(next(iter(device.buses.values())), bus)
 
     def test_failed_initial_read_rolls_back(self):
         buses = []

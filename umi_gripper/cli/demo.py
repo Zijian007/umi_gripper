@@ -1,11 +1,14 @@
 """演示单通道或双通道夹爪控制。"""
 
-from gripper import Gripper, GripperError
+import argparse
+
+from ..bus import UmiError
+from ..compat import Gripper
 
 
-def main():
+def main(config_path):
     try:
-        gripper = Gripper()
+        gripper = Gripper(config_path)
         try:
             channels = sorted(gripper.channels)
             for channel in channels:
@@ -32,9 +35,11 @@ def main():
                 print(f"{channel} 号当前开度：{gripper.get_width(channel):.3f}")
         finally:
             gripper.disconnect()
-    except GripperError as exc:
+    except UmiError as exc:
         print(f"操作失败：{exc}")
 
 
-if __name__ == "__main__":
-    main()
+def cli():
+    parser = argparse.ArgumentParser(description="交互试跑已标定的夹爪")
+    parser.add_argument("--config", default="gripper_config.json", help="标定 JSON 路径")
+    main(parser.parse_args().config)

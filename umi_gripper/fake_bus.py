@@ -35,6 +35,14 @@ class FakeServoBus:
     def check_position_mode(self, sid):
         self._require_open()
 
+    def configure_position_mode(self, sid):
+        self._require_open()
+        self.commands.append(("position_mode", sid))
+
+    def set_current_position_as_middle(self, sid):
+        self._require_open()
+        self.commands.append(("set_middle", sid))
+
     def prepare(self, sid, strength):
         self.set_grip_strength(sid, strength)
 

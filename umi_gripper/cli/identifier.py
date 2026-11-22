@@ -1,6 +1,9 @@
 """手动核对和修改总线舵机 ID。"""
 
-from gripper import GripperError, ServoBus, discover_servos
+import argparse
+
+from ..bus import ServoBus, UmiError
+from ..maintenance import discover_servos
 
 
 def choose(candidates):
@@ -60,9 +63,10 @@ def main():
             print(
                 f"ID 已从 {selected['servo_id']} 修改为 {new_id}，且已重新确认通信正常。"
             )
-        except GripperError as exc:
+        except UmiError as exc:
             print(f"修改失败：{exc}")
 
 
-if __name__ == "__main__":
+def cli():
+    argparse.ArgumentParser(description="扫描、核对和修改舵机 ID").parse_args()
     main()
