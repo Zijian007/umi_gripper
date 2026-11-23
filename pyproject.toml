@@ -19,5 +19,4 @@ umi-id = "umi_gripper.cli.identifier:cli"
 umi-demo = "umi_gripper.cli.demo:cli"
 
 [tool.setuptools]
-py-modules = ["gripper"]
 packages = ["umi_gripper", "umi_gripper.cli"]

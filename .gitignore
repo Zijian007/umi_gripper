@@ -2,3 +2,9 @@
 node_modules/
 __pycache__/
 .vscode/
+.venv/
+*.egg-info/
+/gripper_config.json
+/gripper_config.local.json
+/.gripper_config.json.lock
+/.gripper_config.local.json.lock

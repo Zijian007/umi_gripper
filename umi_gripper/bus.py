@@ -1,4 +1,4 @@
-"""Feetech serial port for one UMI servo bus. Motion scheduling lives in ``runtime.py``."""
+"""Feetech serial port for one UMI servo bus."""
 
 from __future__ import annotations
 
@@ -106,7 +106,10 @@ class ServoBus:
         with self._io_lock:
             if not self.opened or self.packet is None:
                 raise UmiError(f"{action} failed: serial port {self.port_name} is not open")
-            return getattr(self.packet, method)(*args)
+            try:
+                return getattr(self.packet, method)(*args)
+            except OSError as exc:
+                raise UmiError(f"{action} failed on {self.port_name}: {exc}") from exc
 
     @staticmethod
     def _check(result: int, error: int, action: str) -> None:

@@ -1,0 +1,20 @@
+{
+  "servos": [
+    null,
+    {
+      "serial_port": "/dev/ttyACM0",
+      "servo_id": 1,
+      "baudrate": 1000000,
+      "servo_model_number": 2825,
+      "closed_position_steps": 2065,
+      "neutral_position_steps": 2423,
+      "open_position_steps": 2731,
+      "speed": 1200,
+      "open_grip_strength": 40,
+      "close_grip_strength": 100,
+      "status_frequency_hz": 50,
+      "calibration_step_steps": 128,
+      "motion_timeout_s": 30
+    }
+  ]
+}
