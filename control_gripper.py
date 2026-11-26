@@ -23,7 +23,12 @@ from pathlib import Path
 from typing import Any
 
 from umi_gripper import Gripper, UmiError
-from umi_gripper.config import channels_by_servo_id, config_file, load_servo_config, load_servo_configs
+from umi_gripper.config import (
+    channels_by_servo_id,
+    config_file,
+    load_servo_config,
+    load_servo_configs,
+)
 
 
 def calibration_for_id(config_path: Path, servo_id: int) -> tuple[int, dict[str, Any]]:

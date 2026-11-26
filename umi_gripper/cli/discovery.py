@@ -1,6 +1,6 @@
 """Discover attached servos and display the shared selection menu."""
 
-from ..session import _PortBusy, _maintenance_port
+from ..session import _maintenance_port, _PortBusy
 
 DEFAULT_BAUDRATES = (1_000_000, 500_000, 250_000, 115_200, 57_600, 38_400)
 

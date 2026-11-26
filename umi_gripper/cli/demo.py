@@ -7,7 +7,6 @@ from ..bus import UmiError
 from ..config import channels_by_servo_id, config_file, load_servo_configs
 from ..gripper import Gripper
 
-
 _SIDE_NAMES = ("左夹爪", "右夹爪")
 _MOTION_STATUS = {"arrived": "已到位", "grasped": "已夹住", "blocked": "张开受阻", "error": "故障"}
 

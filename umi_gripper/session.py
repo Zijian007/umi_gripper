@@ -6,9 +6,10 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 from .bus import STEPS_PER_TURN, ServoBus, ServoBusPort, UmiError
 from .config import (

@@ -10,7 +10,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from tests.support import FakeServoBus, fake_bus_at_midpoint, write_calibration
-from umi_gripper import Gripper, UmiError, session as umi_session
+from umi_gripper import Gripper, UmiError
+from umi_gripper import session as umi_session
 from umi_gripper.bus import ServoBus, decode_status_block
 from umi_gripper.cli.identifier import change_servo_id
 from umi_gripper.config import default_servo_config

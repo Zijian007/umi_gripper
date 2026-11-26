@@ -5,8 +5,9 @@ from __future__ import annotations
 import math
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from .bus import UmiError
 from .config import (
@@ -17,7 +18,7 @@ from .config import (
     default_servo_config,
     load_servo_config,
 )
-from .session import UmiReading, _OpeningCleanupError, _UmiSession, _open_servo
+from .session import UmiReading, _open_servo, _OpeningCleanupError, _UmiSession
 
 
 def _device_info(channel: int, config: Mapping[str, Any]) -> dict[str, Any]:

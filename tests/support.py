@@ -5,6 +5,7 @@ import threading
 from functools import partial
 from pathlib import Path
 
+
 class FakeServoBus:
     """Simulate servo commands and immediate position feedback."""
 

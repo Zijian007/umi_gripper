@@ -7,8 +7,9 @@ import math
 import os
 import stat
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from .bus import STEPS_PER_TURN, UmiError
 
